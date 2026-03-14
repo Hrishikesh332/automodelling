@@ -4,6 +4,7 @@ This repository follows an `autoresearch`-style layout for tabular modelling:
 
 - `prepare.py` is the fixed evaluation harness.
 - `train.py` is the editable training loop.
+- `planning.py` is the search planner with heuristic fallback and optional LLM-guided next-step selection.
 - `results.tsv` is the experiment registry.
 - `runs/<name>/experiments/*.json` stores the full metric history for each run.
 
@@ -23,11 +24,14 @@ At the top level, `automodelling.py` can now run an autonomous multi-experiment 
 - groups rare categories during one-hot encoding
 - clips numeric outliers before scaling
 - monitors high-cardinality and identifier-like columns
+- checks duplicate rows, target leakage signals, and split drift
 - tunes a binary decision threshold on the training split
 - can include PyTorch tabular MLP candidates for deep learning runs
 - logs both cross-validation and holdout validation performance
 - writes agent reports and visualization artifacts for experiment history and candidate comparisons
 - orders the autonomous search using dataset understanding before trying search profiles
+- writes production handoff artifacts such as a model card, feature schema, and prediction contract
+- writes ablation artifacts so isolated improvements can be separated from bundled changes
 
 ## Primary metrics
 
@@ -55,6 +59,12 @@ Or let the agentic frontend iterate automatically:
 python automodelling.py --dataset /path/to/data.csv --target target_column --output runs/my_task_agentic --max-experiments 5
 ```
 
+Or let an external LLM planner choose the next experiments:
+
+```bash
+python automodelling.py --dataset /path/to/data.csv --target target_column --output runs/my_task_agentic --max-experiments 5 --search-planner llm --llm-planner-command "python /path/to/planner.py"
+```
+
 For another agent or an LLM tool, inspect the run with:
 
 ```bash
@@ -72,5 +82,9 @@ That path now inspects the dataset first and then decides whether to emphasize d
 - `runs/my_task/best_validation_predictions.csv`
 - `runs/my_task/plots/improvement_history.png`
 - `runs/my_task/agentic_search_summary.md`
+- `runs/my_task/handoff/latest_model_card.md`
+- `runs/my_task/handoff/prediction_contract.json`
+- `runs/my_task/analysis/ablation_summary.md`
+- `runs/my_task/analysis/ablation_table.tsv`
 
 4. Edit `train.py` and repeat, keeping the harness fixed.

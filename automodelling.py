@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from deep_learning import isTorchAvailable
+from planning import buildSearchStrategy, chooseNextVariant, plannerCommandValue
 from prepare import ExperimentConfig, ensureDir, prepareExperiment
 from reporting import loadJsonIfPresent
 from train import buildParser as buildTrainParser
@@ -22,117 +22,6 @@ def runMode(argv: list[str]) -> None:
     prepared = prepareExperiment(config, args.output)
     summary = runExperiment(prepared, args.description)
     printSummary(summary)
-
-
-def buildSearchStrategy(preview: Any) -> dict[str, Any]:
-    featurePlan = preview.feature_plan
-    rowCount = int(preview.dataset_profile.get("rows", 0))
-    numericCount = len(featurePlan.numeric_features)
-    categoricalCount = len(featurePlan.categorical_features)
-    highCardinalityCount = len(featurePlan.high_cardinality_columns)
-    totalFeatures = max(1, numericCount + categoricalCount)
-    numericShare = numericCount / totalFeatures
-    mostlyNumeric = numericShare >= 0.75
-    hasManyRows = rowCount >= 5000
-    hasWideFeatureSpace = totalFeatures >= 40
-    hasHeavyCategoricals = categoricalCount >= numericCount and categoricalCount >= 5
-    hasHighCardinality = highCardinalityCount > 0
-    recommendDeepLearning = (
-        preview.config.enable_deep_learning
-        and isTorchAvailable()
-        and mostlyNumeric
-        and (hasManyRows or hasWideFeatureSpace)
-        and not hasHighCardinality
-    )
-    preferredProfile = "deep_focus" if recommendDeepLearning else "tree_heavy" if hasHeavyCategoricals or hasHighCardinality else "balanced"
-    reasons: list[str] = []
-    if recommendDeepLearning:
-        reasons.append("Dataset is mostly numeric and large/wide enough for the PyTorch tabular model to be competitive.")
-    if hasHeavyCategoricals:
-        reasons.append("Categorical structure is strong, so tree ensembles should stay prominent.")
-    if hasHighCardinality:
-        reasons.append("High-cardinality features increase the value of tree-heavy search before promoting deep learning.")
-    if not reasons:
-        reasons.append("The dataset looks like a general mixed tabular problem, so a balanced search is appropriate.")
-
-    return {
-        "rowCount": rowCount,
-        "numericCount": numericCount,
-        "categoricalCount": categoricalCount,
-        "highCardinalityCount": highCardinalityCount,
-        "recommendDeepLearning": recommendDeepLearning,
-        "preferredProfile": preferredProfile,
-        "reasons": reasons,
-    }
-
-
-def buildSearchVariants(base_config: ExperimentConfig, preview: Any) -> list[dict[str, Any]]:
-    strategy = buildSearchStrategy(preview)
-    variants: list[dict[str, Any]] = []
-
-    if strategy["preferredProfile"] == "deep_focus":
-        variants.append(
-            {
-                "description": "deep-learning focused search",
-                "reason": "Dataset understanding suggests a dense numeric problem where deep learning may win.",
-                "changes": {"candidate_profile": "deep_focus"},
-            }
-        )
-        variants.append(
-            {
-                "description": "baseline balanced search",
-                "reason": "Keep a broad baseline so the deep-learning recommendation is tested against strong classical models.",
-                "changes": {"candidate_profile": "balanced"},
-            }
-        )
-        variants.append(
-            {
-                "description": "compact deep-learning search",
-                "reason": "Check whether a smaller neural profile generalizes more cleanly on the same task.",
-                "changes": {"candidate_profile": "compact"},
-            }
-        )
-    else:
-        variants.append(
-            {
-                "description": "baseline balanced search",
-                "reason": "Establish a stable reference across all candidate families.",
-                "changes": {"candidate_profile": "balanced"},
-            }
-        )
-        variants.append(
-            {
-                "description": "tree-heavy search",
-                "reason": "Dataset understanding suggests tree ensembles are likely to be strong.",
-                "changes": {"candidate_profile": "tree_heavy"},
-            }
-        )
-        variants.append(
-            {
-                "description": "regularized search",
-                "reason": "Check whether a more conservative profile reduces overfitting.",
-                "changes": {"candidate_profile": "regularized"},
-            }
-        )
-        if base_config.enable_deep_learning and isTorchAvailable():
-            variants.append(
-                {
-                    "description": "deep-learning challenger search",
-                    "reason": "Run a neural challenger after the classical baselines to verify whether it adds value.",
-                    "changes": {"candidate_profile": "deep_focus"},
-                }
-            )
-
-    if preview.problem_type == "classification" and preview.isBinaryClassification:
-        variants.append(
-            {
-                "description": "recall-aware threshold search",
-                "reason": "Tune the decision threshold toward recall-sensitive binary behaviour.",
-                "changes": {"binary_threshold_metric": "recall"},
-            }
-        )
-
-    return variants
 
 
 def applyConfigChanges(config: ExperimentConfig, changes: dict[str, Any]) -> ExperimentConfig:
@@ -178,9 +67,11 @@ def writeSearchSummary(output_dir: Path, executed_runs: list[dict[str, Any]], pr
             [
                 f"### {summary['experiment_id']} - {summary['description']}",
                 f"- Reason: {item['reason']}",
+                f"- Planner: {item.get('planner', {}).get('mode', 'heuristic')}",
                 f"- Status: {summary['status']}",
                 f"- Best model: {best['name']}",
                 f"- {summary['primary_metric']}: {best['validation_metrics'].get(summary['primary_metric'])}",
+                f"- Ablation isolation: {summary.get('ablation', {}).get('isolation_level', '')}",
                 f"- Experiment summary: {summary['artifacts']['experiment_summary']}",
                 f"- Agent report: {summary['artifacts'].get('agent_report', '')}",
             ]
@@ -189,6 +80,8 @@ def writeSearchSummary(output_dir: Path, executed_runs: list[dict[str, Any]], pr
             lines.append(f"- Candidate plot: {summary['artifacts']['candidate_plot']}")
         if summary["artifacts"].get("training_curve_plot"):
             lines.append(f"- Training curve: {summary['artifacts']['training_curve_plot']}")
+        if summary["artifacts"].get("ablation_summary"):
+            lines.append(f"- Ablation summary: {summary['artifacts']['ablation_summary']}")
         lines.append("")
 
     best_summary = loadJsonIfPresent(output_dir / "best_summary.json")
@@ -210,7 +103,13 @@ def writeSearchSummary(output_dir: Path, executed_runs: list[dict[str, Any]], pr
     return path
 
 
-def writeAgentManifest(output_dir: Path, executed_runs: list[dict[str, Any]], preview: Any) -> Path:
+def writeAgentManifest(
+    output_dir: Path,
+    executed_runs: list[dict[str, Any]],
+    preview: Any,
+    plannerMode: str,
+    llmPlannerCommand: str | None,
+) -> Path:
     bestSummary = loadJsonIfPresent(output_dir / "best_summary.json")
     latestSummary = loadJsonIfPresent(output_dir / "latest_summary.json")
     strategy = buildSearchStrategy(preview)
@@ -231,12 +130,14 @@ def writeAgentManifest(output_dir: Path, executed_runs: list[dict[str, Any]], pr
                 "description": item["summary"]["description"],
                 "reason": item["reason"],
                 "status": item["summary"]["status"],
+                "planner": item.get("planner", {}),
                 "experimentId": item["summary"]["experiment_id"],
                 "primaryScore": item["summary"]["best_candidate"]["validation_metrics"].get(
                     item["summary"]["primary_metric"]
                 ),
                 "summaryPath": item["summary"]["artifacts"]["experiment_summary"],
                 "agentReportPath": item["summary"]["artifacts"].get("agent_report"),
+                "ablationSummaryPath": item["summary"]["artifacts"].get("ablation_summary"),
             }
             for item in executed_runs
         ],
@@ -245,6 +146,12 @@ def writeAgentManifest(output_dir: Path, executed_runs: list[dict[str, Any]], pr
             "searchSummary": str(output_dir / "agentic_search_summary.md"),
             "bestSummary": str(output_dir / "best_summary.json"),
             "latestSummary": str(output_dir / "latest_summary.json"),
+            "ablationTable": str(output_dir / "analysis" / "ablation_table.tsv"),
+            "ablationSummary": str(output_dir / "analysis" / "ablation_summary.md"),
+        },
+        "planner": {
+            "configuredMode": plannerMode,
+            "llmCommandConfigured": plannerCommandValue(llmPlannerCommand) is not None,
         },
         "suggestedNextActions": [
             f"python automodelling.py inspect --output {output_dir}",
@@ -269,22 +176,61 @@ def searchMode(argv: list[str]) -> None:
         default=5,
         help="Maximum autonomous search iterations to execute.",
     )
+    parser.add_argument(
+        "--search-planner",
+        choices=["auto", "heuristic", "llm"],
+        default="auto",
+        help="How to choose the next experiment. 'llm' uses an external planner command and falls back safely if needed.",
+    )
+    parser.add_argument(
+        "--llm-planner-command",
+        type=str,
+        default=None,
+        help="Optional command that reads planner JSON from stdin and returns the next experiment as JSON.",
+    )
     args = parser.parse_args(argv)
     base_config = resolveConfig(args)
     preview = prepareExperiment(deepcopy(base_config), args.output)
     base_config.goal = preview.config.goal
 
-    variants = buildSearchVariants(base_config, preview)[: max(1, args.max_experiments)]
     executed_runs: list[dict[str, Any]] = []
-    for variant in variants:
+    for _ in range(max(1, args.max_experiments)):
+        variant = chooseNextVariant(
+            base_config,
+            preview,
+            executed_runs,
+            args.max_experiments,
+            args.search_planner,
+            args.llm_planner_command,
+        )
+        if variant is None:
+            break
         config = applyConfigChanges(base_config, variant["changes"])
         prepared = prepareExperiment(config, args.output)
-        summary = runExperiment(prepared, variant["description"])
-        executed_runs.append({"summary": summary, "reason": variant["reason"], "changes": variant["changes"]})
+        summary = runExperiment(
+            prepared,
+            variant["description"],
+            plannerContext=variant.get("planner"),
+            plannedChanges=variant.get("changes"),
+        )
+        executed_runs.append(
+            {
+                "summary": summary,
+                "reason": variant["reason"],
+                "changes": variant["changes"],
+                "planner": variant.get("planner", {}),
+            }
+        )
         printSummary(summary)
 
     search_summary_path = writeSearchSummary(args.output, executed_runs, preview)
-    manifestPath = writeAgentManifest(args.output, executed_runs, preview)
+    manifestPath = writeAgentManifest(
+        args.output,
+        executed_runs,
+        preview,
+        args.search_planner,
+        args.llm_planner_command,
+    )
     print(f"Agentic search summary: {search_summary_path}")
     print(f"Agentic manifest: {manifestPath}")
 
@@ -312,6 +258,12 @@ def buildInspectPayload(output_dir: Path, limit: int) -> dict[str, Any]:
         "recentResults": rows[-max(1, limit) :] if rows else [],
         "searchSummaryPath": str(searchSummaryPath) if searchSummaryPath.exists() else None,
         "agenticManifestPath": str(manifestPath) if manifestPath.exists() else None,
+        "ablationSummaryPath": str(output_dir / "analysis" / "ablation_summary.md")
+        if (output_dir / "analysis" / "ablation_summary.md").exists()
+        else None,
+        "ablationTablePath": str(output_dir / "analysis" / "ablation_table.tsv")
+        if (output_dir / "analysis" / "ablation_table.tsv").exists()
+        else None,
     }
 
 
@@ -327,6 +279,7 @@ def inspectMode(argv: list[str]) -> None:
     bestSummary = payload["bestSummary"]
     recentResults = payload["recentResults"]
     searchSummaryPath = payload["searchSummaryPath"]
+    ablationSummaryPath = payload["ablationSummaryPath"]
 
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=True, default=str))
@@ -353,6 +306,9 @@ def inspectMode(argv: list[str]) -> None:
             for warning in warnings:
                 print(f"- {warning}")
         artifacts = latestSummary.get("artifacts", {})
+        planner = latestSummary.get("planner")
+        if planner:
+            print(f"Planner: {planner.get('mode')} ({planner.get('source')})")
         if artifacts.get("agent_report"):
             print(f"Agent report: {artifacts['agent_report']}")
         if artifacts.get("history_plot"):
@@ -361,6 +317,12 @@ def inspectMode(argv: list[str]) -> None:
             print(f"Candidate plot: {artifacts['candidate_plot']}")
         if artifacts.get("training_curve_plot"):
             print(f"Training curve: {artifacts['training_curve_plot']}")
+        if artifacts.get("model_card"):
+            print(f"Model card: {artifacts['model_card']}")
+        if artifacts.get("prediction_contract"):
+            print(f"Prediction contract: {artifacts['prediction_contract']}")
+        if artifacts.get("ablation_summary"):
+            print(f"Ablation summary: {artifacts['ablation_summary']}")
 
     if bestSummary is not None:
         bestCandidate = bestSummary["best_candidate"]
@@ -373,6 +335,8 @@ def inspectMode(argv: list[str]) -> None:
 
     if searchSummaryPath is not None:
         print(f"Search summary: {searchSummaryPath}")
+    if ablationSummaryPath is not None:
+        print(f"Ablation summary: {ablationSummaryPath}")
 
     if recentResults:
         print("Recent results:")

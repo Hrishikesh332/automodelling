@@ -490,6 +490,7 @@ def buildDatasetProfile(
     target_column: str,
     problem_type: ProblemType,
     feature_plan: FeaturePlan,
+    quality_checks: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     missing_pct = (df.isna().mean() * 100.0).round(4).to_dict()
     dtypes = {column: str(dtype) for column, dtype in df.dtypes.to_dict().items()}
@@ -532,7 +533,134 @@ def buildDatasetProfile(
         "target_summary": target_summary,
         "feature_plan": asdict(feature_plan),
         "warnings": feature_plan.warnings,
+        "quality_checks": quality_checks or {},
     }
+
+
+def stringifiedSeries(series: pd.Series) -> pd.Series:
+    return series.fillna("<NA>").astype(str).str.strip().str.lower()
+
+
+def detectLeakageColumns(
+    X: pd.DataFrame,
+    y: pd.Series,
+) -> list[dict[str, Any]]:
+    suspected: list[dict[str, Any]] = []
+    targetText = stringifiedSeries(y)
+
+    for column in X.columns:
+        columnSeries = X[column]
+        featureText = stringifiedSeries(columnSeries)
+        equalityShare = float((featureText == targetText).mean())
+        numericCorrelation: float | None = None
+        if pd.api.types.is_numeric_dtype(columnSeries) and pd.api.types.is_numeric_dtype(y):
+            joined = pd.concat(
+                [
+                    pd.to_numeric(columnSeries, errors="coerce").rename("feature"),
+                    pd.to_numeric(y, errors="coerce").rename("target"),
+                ],
+                axis=1,
+            ).dropna()
+            if len(joined) >= 3 and joined["feature"].nunique() > 1 and joined["target"].nunique() > 1:
+                numericCorrelation = float(abs(joined["feature"].corr(joined["target"])))
+
+        if equalityShare >= 0.98 or (numericCorrelation is not None and numericCorrelation >= 0.995):
+            suspected.append(
+                {
+                    "column": column,
+                    "equality_share": round(equalityShare, 6),
+                    "numeric_correlation": None if numericCorrelation is None else round(numericCorrelation, 6),
+                }
+            )
+
+    return suspected
+
+
+def detectConflictingDuplicateTargets(X: pd.DataFrame, y: pd.Series) -> int:
+    if X.empty:
+        return 0
+    rowHashes = pd.util.hash_pandas_object(X.fillna("<NA>"), index=False)
+    grouped = pd.DataFrame({"row_hash": rowHashes, "target": y}).groupby("row_hash")["target"].nunique(dropna=False)
+    conflictingHashes = grouped[grouped > 1].index
+    if len(conflictingHashes) == 0:
+        return 0
+    return int(pd.Series(rowHashes).isin(conflictingHashes).sum())
+
+
+def buildSplitDrift(
+    problem_type: ProblemType,
+    y_train: pd.Series,
+    y_val: pd.Series,
+) -> dict[str, Any]:
+    if problem_type == "classification":
+        trainDist = (y_train.fillna("<NA>").astype(str).value_counts(normalize=True)).to_dict()
+        valDist = (y_val.fillna("<NA>").astype(str).value_counts(normalize=True)).to_dict()
+        labels = sorted(set(trainDist) | set(valDist))
+        maxAbsShareDelta = 0.0
+        for label in labels:
+            maxAbsShareDelta = max(maxAbsShareDelta, abs(trainDist.get(label, 0.0) - valDist.get(label, 0.0)))
+        return {
+            "train_distribution": {str(key): float(value) for key, value in trainDist.items()},
+            "validation_distribution": {str(key): float(value) for key, value in valDist.items()},
+            "max_abs_share_delta": float(maxAbsShareDelta),
+        }
+
+    trainMean = float(pd.to_numeric(y_train, errors="coerce").mean())
+    valMean = float(pd.to_numeric(y_val, errors="coerce").mean())
+    trainStd = float(pd.to_numeric(y_train, errors="coerce").std(ddof=0) or 0.0)
+    valStd = float(pd.to_numeric(y_val, errors="coerce").std(ddof=0) or 0.0)
+    denominator = max(abs(trainStd), 1e-12)
+    return {
+        "train_mean": trainMean,
+        "validation_mean": valMean,
+        "train_std": trainStd,
+        "validation_std": valStd,
+        "mean_shift_std_units": float(abs(trainMean - valMean) / denominator),
+    }
+
+
+def buildQualityChecks(
+    X: pd.DataFrame,
+    y: pd.Series,
+    problem_type: ProblemType,
+    y_train: pd.Series,
+    y_val: pd.Series,
+) -> tuple[dict[str, Any], list[str]]:
+    duplicateFeatureRows = int(X.duplicated().sum())
+    conflictingDuplicateTargets = detectConflictingDuplicateTargets(X, y)
+    suspectedLeakageColumns = detectLeakageColumns(X, y)
+    splitDrift = buildSplitDrift(problem_type, y_train, y_val)
+
+    warnings: list[str] = []
+    if duplicateFeatureRows > 0:
+        warnings.append(
+            f"Detected {duplicateFeatureRows} duplicate feature row(s). Review whether repeated entities are expected."
+        )
+    if conflictingDuplicateTargets > 0:
+        warnings.append(
+            f"Detected {conflictingDuplicateTargets} row(s) where identical features map to different targets."
+        )
+    if suspectedLeakageColumns:
+        columns = ", ".join(item["column"] for item in suspectedLeakageColumns[:5])
+        warnings.append(
+            f"Possible target leakage detected in: {columns}. Review these columns before trusting leaderboard gains."
+        )
+
+    if problem_type == "classification":
+        if float(splitDrift.get("max_abs_share_delta", 0.0)) > 0.15:
+            warnings.append("Train/validation class balance drift looks high. Review the split before trusting the score.")
+    elif float(splitDrift.get("mean_shift_std_units", 0.0)) > 0.5:
+        warnings.append("Train/validation target distribution drift looks high for regression. Review the split.")
+
+    return (
+        {
+            "duplicate_feature_rows": duplicateFeatureRows,
+            "conflicting_duplicate_target_rows": conflictingDuplicateTargets,
+            "suspected_leakage_columns": suspectedLeakageColumns,
+            "split_drift": splitDrift,
+        },
+        warnings,
+    )
 
 
 def resolveCvFolds(problem_type: ProblemType, y_train: pd.Series, requested_folds: int) -> int:
@@ -606,7 +734,9 @@ def prepareExperiment(config: ExperimentConfig, output_dir: Path) -> PreparedExp
         )
 
     cv_folds = resolveCvFolds(problem_type, y_train, config.cv_folds)
-    dataset_profile = buildDatasetProfile(df, target_column, problem_type, feature_plan)
+    qualityChecks, qualityWarnings = buildQualityChecks(X, y, problem_type, y_train, y_val)
+    feature_plan.warnings.extend(qualityWarnings)
+    dataset_profile = buildDatasetProfile(df, target_column, problem_type, feature_plan, quality_checks=qualityChecks)
     dataset_profile["rows_dropped_missing_target"] = dropped_target_na
     dataset_profile["dataset_source"] = dataset_source
     dataset_profile["resolved_dataset_path"] = str(dataset_path)

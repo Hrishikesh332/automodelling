@@ -1,42 +1,23 @@
 # automodelling
 
-Training-first tabular modelling project structured in the spirit of `karpathy/autoresearch`, but upgraded for more realistic production-style experimentation.
+`automodelling` is an agentic tabular modelling system.
 
-The project is split into:
+You give it a tabular dataset, it runs structured experiments, tracks metrics, keeps the best artifact, and writes the reports needed to understand what changed and what to deploy.
 
-- `prepare.py` - fixed data loading, feature planning, splits, metrics, and logging harness
-- `train.py` - editable training loop where you iterate on models and hyperparameters
-- `program.md` - experiment rules and iteration guidance
-- `automodelling.py` - top-level entrypoint for running, inspecting, and bootstrapping experiments
+It is strongest on tabular data. It is not yet a general image, text, audio, or video training framework.
 
-## What makes this more real-world
+## What You Can Do
 
-The harness now does more than a plain baseline sweep:
+- run a full agentic search from a dataset path or URL
+- compare classical ML and tabular deep learning in one workflow
+- inspect metrics, plots, model artifacts, and reasoning after each run
+- generate deploy-facing handoff files such as a model card and prediction contract
+- run ablation analysis to see whether a gain came from one isolated change or from a bundle of changes
+- optionally let an external LLM choose the next experiment
 
-- fixed train/validation split and cross-validation for fair comparisons
-- robust numeric preprocessing with quantile clipping, imputation, and scaling
-- rare-category-aware one-hot encoding with category grouping
-- automatic dropping of constant and almost-entirely-missing columns
-- richer diagnostics for high-cardinality and identifier-like columns
-- imbalance-aware classification candidates
-- PyTorch tabular MLP candidates as part of the same main model search
-- binary threshold tuning on the training split
-- stronger single-model and ensemble candidates
-- persistent experiment registry with keep/discard status
-- visualization artifacts for history, candidate comparison, and deep-learning curves
-- agent-facing reports that mention what changed in params and config across runs
-- dataset-aware search planning that decides whether to emphasize trees, regularized baselines, or deep learning first
+## Quick Start
 
-This makes iteration closer to an actual modelling workflow: edit `train.py`, re-run one experiment, inspect the registry, and keep only meaningful gains.
-
-The top-level `automodelling.py` script is now more agentic than `train.py`: it can start from a dataset path or URL, infer a sensible initial task when the user gives only the dataset, run a short autonomous search over multiple profiles, and promote the best artifact.
-
-There are two intended entrypoints:
-
-- human-friendly: `python automodelling.py --dataset ... --output ...`
-- agent / LLM-friendly: run the same search, then call `python automodelling.py inspect --output ... --json` for pure machine-readable state
-
-## Install
+### 1. Install
 
 ```bash
 python3 -m venv .venv
@@ -44,9 +25,101 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### 2. Run the agentic search
+
+```bash
+python automodelling.py --dataset /path/to/data.csv --target churn --output runs/churn_search
+```
+
+If you do not pass `--goal`, the tool will generate a sensible default goal from the target.
+
+The `dataset` value can be:
+
+- a local file path
+- a direct URL
+- a `file://...` URL
+
+### 3. Inspect the result
+
+Human-friendly:
+
+```bash
+python automodelling.py inspect --output runs/churn_search
+```
+
+Machine-readable:
+
+```bash
+python automodelling.py inspect --output runs/churn_search --json
+```
+
+## The Easiest Mental Model
+
+Think of the project as 3 layers:
+
+- [prepare.py](/Users/hrishikesh/Desktop/automodelling/prepare.py): fixed evaluation harness
+- [train.py](/Users/hrishikesh/Desktop/automodelling/train.py): candidate models and training logic
+- [automodelling.py](/Users/hrishikesh/Desktop/automodelling/automodelling.py): agentic entrypoint that plans, runs, compares, and promotes experiments
+
+There is also [planning.py](/Users/hrishikesh/Desktop/automodelling/planning.py), which decides what to try next, and can optionally use an external LLM planner.
+
+## What Happens In One Run
+
+When you run `automodelling.py`, the system:
+
+1. loads the dataset and resolves the target
+2. infers classification or regression if needed
+3. creates a fixed train/validation split and CV setup
+4. builds preprocessing for numeric and categorical features
+5. runs safety checks such as duplicate detection, leakage hints, and split drift
+6. evaluates candidate models
+7. compares the result against the previous best
+8. keeps or discards the run for promotion
+9. writes reports, plots, artifacts, and ablation analysis
+
+## Main Workflows
+
+### Agentic search
+
+This is the default and recommended workflow.
+
+```bash
+python automodelling.py --dataset /path/to/data.csv --target target_column --output runs/my_task
+```
+
+Useful flags:
+
+- `--max-experiments 5` to limit the search length
+- `--goal "Predict customer churn"` to make the objective explicit
+- `--disable-deep-learning` to force classical ML only
+
+### Single experiment
+
+Use this when you want to run exactly one experiment instead of a search.
+
+```bash
+python automodelling.py run --program program.json --output runs/my_task_single --description "baseline sweep"
+```
+
+You can also call [train.py](/Users/hrishikesh/Desktop/automodelling/train.py) directly:
+
+```bash
+python train.py --program program.json --output runs/my_task_single --description "baseline sweep"
+```
+
+### Starter config file
+
+You can generate a starter JSON program file:
+
+```bash
+python automodelling.py init-program --path program.json --dataset /path/to/data.csv --target churn --goal "Predict churn"
+```
+
 ## Program JSON
 
-Create a small `program.json` to define the task:
+You do not need a `program.json` to get started, but it is useful when you want a repeatable setup.
+
+Example:
 
 ```json
 {
@@ -74,77 +147,27 @@ Create a small `program.json` to define the task:
 }
 ```
 
-The `dataset` field can be a local path or a direct URL. `file://...` sources also work.
+The most useful config fields are:
 
-Useful config fields:
+- `target`: explicit target column
+- `test_size`: validation split size
+- `cv_folds`: cross-validation folds
+- `enable_deep_learning`: include tabular PyTorch models
+- `binary_threshold_metric`: objective used to tune the binary decision threshold
+- `candidate_profile`: manually steer the search family if you do not want automatic ordering
 
-- `drop_high_missing_threshold` drops feature columns that are mostly empty
-- `categorical_min_frequency` groups rare categories during one-hot encoding
-- `categorical_max_categories` limits one-hot expansion
-- `numeric_clip_quantile` clips extreme numeric tails before scaling
-- `binary_threshold_metric` chooses how the classification threshold is tuned on the training split
-- `enable_deep_learning` toggles PyTorch tabular candidates on or off
-- `deep_learning_*` controls hidden sizes, optimizer settings, early stopping, and device selection
-- `candidate_profile` lets you override the search family manually, but the agentic frontend now tries to choose the ordering from the dataset first
+## Models Included
 
-## Run the Generic Agentic Search
-
-This is the generic frontend for “give it a dataset and iterate”:
-
-```bash
-python automodelling.py --dataset /path/to/data.csv --target churn --output runs/churn_agentic --max-experiments 5
-```
-
-You can also point it at a URL:
-
-```bash
-python automodelling.py --dataset https://example.com/data.csv --target churn --output runs/churn_agentic --max-experiments 5
-```
-
-If `--goal` is omitted, the tool will generate a reasonable default goal from the inferred or explicit target.
-
-The search now starts by understanding the dataset shape and feature mix, then prioritizes the model family order. For example:
-
-- mostly numeric and large/wide datasets push deep learning earlier
-- heavy categorical or high-cardinality datasets keep tree-heavy search earlier
-- smaller or noisier datasets keep regularized baselines in the loop
-
-## Run a Single Experiment
-
-```bash
-python train.py --program program.json --output runs/churn_v1 --description "baseline real-world sweep"
-```
-
-The top-level entrypoint also supports explicit single-run mode:
-
-```bash
-python automodelling.py run --program program.json --output runs/churn_v1 --description "baseline real-world sweep"
-```
-
-You can also use explicit modes:
-
-```bash
-python automodelling.py --dataset /path/to/data.csv --output runs/agentic_auto --max-experiments 5
-python automodelling.py agent --dataset /path/to/data.csv --output runs/agentic_auto --max-experiments 5
-python automodelling.py search --program program.json --output runs/churn_agentic --max-experiments 5
-python automodelling.py run --program program.json --output runs/churn_single --description "baseline real-world sweep"
-python automodelling.py inspect --output runs/churn_v1
-python automodelling.py inspect --output runs/churn_v1 --json
-python automodelling.py init-program --path program.json --goal "Predict churn" --dataset /path/to/data.csv --target churn
-```
-
-## Default candidate families
-
-Classification:
+Classification candidates:
 
 - logistic regression
 - random forest
 - extra trees
 - histogram gradient boosting
 - soft-voting ensemble
-- torch tabular MLP when `torch` is available and deep learning is enabled
+- torch tabular MLP when deep learning is enabled and `torch` is available
 
-Regression:
+Regression candidates:
 
 - ridge
 - elastic net
@@ -153,7 +176,7 @@ Regression:
 - extra trees
 - histogram gradient boosting
 - voting ensemble
-- torch tabular MLP when `torch` is available and deep learning is enabled
+- torch tabular MLP when deep learning is enabled and `torch` is available
 
 ## Metrics
 
@@ -168,31 +191,116 @@ Secondary metrics:
 - classification: `accuracy`, `balanced_accuracy`, `f1_weighted`, `precision_positive`, `recall_positive`, `roc_auc`, `log_loss`, `brier_score`
 - regression: `r2`, `mae`, `rmse`, `median_ae`
 
-## Logged artifacts
+## Safety And Reliability Checks
 
-Each run writes:
+Before you trust a score, the harness also checks for:
 
-- `runs/<name>/dataset_profile.json` - fixed EDA, feature plan, and warnings
-- `runs/<name>/results.tsv` - one-line experiment registry
-- `runs/<name>/latest_summary.json` - full JSON summary for the latest experiment
-- `runs/<name>/experiments/exp_XXXX.json` - detailed per-experiment report
-- `runs/<name>/experiments/exp_XXXX_agent_report.md` - agent-oriented summary with score deltas and parameter changes
-- `runs/<name>/experiments/exp_XXXX_validation_predictions.csv` - validation predictions for the winning candidate from that experiment
-- `runs/<name>/plots/improvement_history.png` - score history across experiments
-- `runs/<name>/plots/exp_XXXX_candidate_scores.png` - latest candidate comparison for the tracked metric
-- `runs/<name>/plots/exp_XXXX_training_curve.png` - training curve when the winning model is a deep learning model
-- `runs/<name>/agentic_search_summary.md` - top-level autonomous search summary when you use `automodelling.py` in search mode
-- `runs/<name>/agentic_manifest.json` - machine-readable run manifest for other agents or LLM tools
+- constant columns
+- mostly missing columns
+- rare and high-cardinality categorical behavior
+- identifier-like columns
+- duplicate feature rows
+- conflicting duplicate targets
+- possible target leakage columns
+- train/validation target drift
 
-If the experiment beats the previous best primary score, it also updates:
+## What Gets Written
 
-- `runs/<name>/best_model.joblib`
-- `runs/<name>/best_summary.json`
-- `runs/<name>/best_validation_predictions.csv`
+Each run directory contains a full artifact trail.
 
-## How to iterate well
+Core run outputs:
 
-1. Keep `prepare.py` stable.
-2. Edit `train.py` to change model families, hyperparameters, or ensembling logic.
-3. Re-run with a clear `--description`.
-4. Compare `results.tsv`, threshold details, train-vs-validation gap, and warnings before keeping the change.
+- `results.tsv`: experiment registry
+- `latest_summary.json`: latest full summary
+- `best_summary.json`: promoted best summary
+- `best_model.joblib`: promoted model artifact when a run is kept
+
+Per-experiment outputs:
+
+- `experiments/exp_XXXX.json`: detailed experiment summary
+- `experiments/exp_XXXX_agent_report.md`: readable report for that experiment
+- `experiments/exp_XXXX_validation_predictions.csv`: validation predictions for the winning candidate
+
+Visual outputs:
+
+- `plots/improvement_history.png`
+- `plots/exp_XXXX_candidate_scores.png`
+- `plots/exp_XXXX_training_curve.png` when the winning model is a deep learning model
+
+Deployment handoff:
+
+- `handoff/feature_schema.json`
+- `handoff/prediction_contract.json`
+- `handoff/latest_model_card.md`
+- `handoff/promoted_model_card.md`
+
+Agent-facing outputs:
+
+- `agentic_search_summary.md`
+- `agentic_manifest.json`
+
+Ablation outputs:
+
+- `analysis/ablation_table.tsv`
+- `analysis/ablation_summary.md`
+
+## How To Read The Results
+
+If you only check a few files, start here:
+
+- `results.tsv` to see the experiment history
+- `latest_summary.json` to see the newest full result
+- `best_summary.json` to see the currently promoted model
+- `experiments/exp_XXXX_agent_report.md` to understand what changed
+- `analysis/ablation_summary.md` to see whether the improvement came from one isolated change or from a bundled run
+- `handoff/latest_model_card.md` if you care about deployment or handoff
+
+## Optional: External LLM Planner
+
+The default planner is built in and heuristic.
+
+You can optionally hand planning over to an external command:
+
+```bash
+python automodelling.py \
+  --dataset /path/to/data.csv \
+  --output runs/my_task \
+  --max-experiments 5 \
+  --search-planner llm \
+  --llm-planner-command "python /path/to/your_planner.py"
+```
+
+The planner command receives JSON on `stdin` and should return JSON like this:
+
+```json
+{
+  "description": "short experiment name",
+  "reason": "why this experiment should run next",
+  "changes": {
+    "candidate_profile": "regularized"
+  }
+}
+```
+
+If the external planner fails or returns something invalid, the system falls back safely to the built-in planner.
+
+## How To Iterate Well
+
+- keep [prepare.py](/Users/hrishikesh/Desktop/automodelling/prepare.py) stable so comparisons stay fair
+- make model and search changes in [train.py](/Users/hrishikesh/Desktop/automodelling/train.py) or [planning.py](/Users/hrishikesh/Desktop/automodelling/planning.py)
+- use a clear `--description` for each run
+- prefer one planned change at a time when you want strong attribution evidence
+- check the generalization gap, warnings, and ablation summary before promoting a change
+
+## Current Scope
+
+This project is a strong tabular experimentation system with:
+
+- classical ML
+- tabular deep learning
+- experiment tracking
+- agentic search
+- deploy-facing handoff artifacts
+- ablation analysis
+
+It is not yet a full multimodal research framework.

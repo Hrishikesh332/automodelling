@@ -49,7 +49,15 @@ from prepare import (
     saveValidationPredictions,
     serializableCandidate,
 )
-from reporting import diffDicts, generateVisualizations, loadJsonIfPresent, writeAgentReport
+from reporting import (
+    buildAblationMetadata,
+    diffDicts,
+    generateVisualizations,
+    loadJsonIfPresent,
+    writeAblationArtifacts,
+    writeAgentReport,
+    writeProductionArtifacts,
+)
 
 
 @dataclass(frozen=True)
@@ -445,7 +453,12 @@ def resolveConfig(args: argparse.Namespace) -> ExperimentConfig:
     return config
 
 
-def runExperiment(prepared: PreparedExperiment, description: str) -> dict[str, Any]:
+def runExperiment(
+    prepared: PreparedExperiment,
+    description: str,
+    plannerContext: dict[str, Any] | None = None,
+    plannedChanges: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     start = perf_counter()
     candidates = buildCandidates(prepared)
     previous_best_summary = loadJsonIfPresent(prepared.output_dir / "best_summary.json")
@@ -565,6 +578,9 @@ def runExperiment(prepared: PreparedExperiment, description: str) -> dict[str, A
             "validation_predictions": str(validation_path),
         },
     }
+    if plannerContext is not None:
+        summary["planner"] = plannerContext
+    summary["planned_changes"] = plannedChanges or {}
 
     previous_best_candidate = previous_best_summary.get("best_candidate") if previous_best_summary else None
     previous_latest_candidate = previous_latest_summary.get("best_candidate") if previous_latest_summary else None
@@ -613,6 +629,7 @@ def runExperiment(prepared: PreparedExperiment, description: str) -> dict[str, A
             "best_model": previous_latest_candidate.get("name") if previous_latest_candidate else None,
         },
     }
+    summary["ablation"] = buildAblationMetadata(summary, IMPROVEMENT_EPSILON)
 
     if improved:
         best_model_path = prepared.output_dir / "best_model.joblib"
@@ -634,13 +651,22 @@ def runExperiment(prepared: PreparedExperiment, description: str) -> dict[str, A
     summary["artifacts"]["latest_summary"] = str(prepared.output_dir / "latest_summary.json")
     visual_artifacts = generateVisualizations(prepared.output_dir, summary)
     summary["artifacts"].update(visual_artifacts)
+    productionArtifacts = writeProductionArtifacts(prepared.output_dir, summary)
+    summary["artifacts"].update(productionArtifacts)
     agent_report_path = experiments_dir / f"{experiment_id}_agent_report.md"
     summary["artifacts"]["agent_report"] = str(agent_report_path)
     safeJsonDump(summary, summary_path)
     safeJsonDump(summary, prepared.output_dir / "latest_summary.json")
-    writeAgentReport(agent_report_path, summary)
     if improved:
         safeJsonDump(summary, prepared.output_dir / "best_summary.json")
+
+    ablationArtifacts = writeAblationArtifacts(prepared.output_dir)
+    summary["artifacts"].update(ablationArtifacts)
+    safeJsonDump(summary, summary_path)
+    safeJsonDump(summary, prepared.output_dir / "latest_summary.json")
+    if improved:
+        safeJsonDump(summary, prepared.output_dir / "best_summary.json")
+    writeAgentReport(agent_report_path, summary)
 
     return summary
 
@@ -690,6 +716,12 @@ def printSummary(summary: dict[str, Any]) -> None:
         print(f"Candidate plot: {summary['artifacts']['candidate_plot']}")
     if summary["artifacts"].get("training_curve_plot"):
         print(f"Training curve plot: {summary['artifacts']['training_curve_plot']}")
+    if summary["artifacts"].get("model_card"):
+        print(f"Model card: {summary['artifacts']['model_card']}")
+    if summary["artifacts"].get("prediction_contract"):
+        print(f"Prediction contract: {summary['artifacts']['prediction_contract']}")
+    if summary["artifacts"].get("ablation_summary"):
+        print(f"Ablation summary: {summary['artifacts']['ablation_summary']}")
     print(f"Results registry: {summary['artifacts']['results_tsv']}")
 
 
