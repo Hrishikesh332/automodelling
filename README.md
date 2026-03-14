@@ -1,10 +1,29 @@
 # automodelling
 
-`automodelling` is an agentic tabular modelling system.
+`automodelling` is an agentic tabular modelling system designed to be used in an `autoresearch`-style workflow.
 
 You give it a tabular dataset, it runs structured experiments, tracks metrics, keeps the best artifact, and writes the reports needed to understand what changed and what to deploy.
 
 It is strongest on tabular data. It is not yet a general image, text, audio, or video training framework.
+
+## Running The Agent
+
+If you want to use this in the `karpathy/autoresearch` style, the intended flow is:
+
+1. open the repo in your coding agent
+2. tell the agent to read [program.md](/Users/hrishikesh/Desktop/automodelling/program.md)
+3. let the agent iterate mostly by editing [train.py](/Users/hrishikesh/Desktop/automodelling/train.py), while keeping [prepare.py](/Users/hrishikesh/Desktop/automodelling/prepare.py) stable
+4. run the repo-level agent entrypoint:
+
+```bash
+python agent.py --dataset /path/to/data.csv --target target_column --output runs/my_task
+```
+
+For a coding agent prompt, this is the simplest version:
+
+```text
+Read program.md, keep prepare.py stable, improve train.py, run experiments, track the metrics, and keep only real improvements.
+```
 
 ## What You Can Do
 
@@ -27,8 +46,22 @@ pip install -r requirements.txt
 
 ### 2. Run the agentic search
 
+Recommended `autoresearch`-style wrapper:
+
+```bash
+python agent.py --dataset /path/to/data.csv --target churn --output runs/churn_search
+```
+
+Direct backend entrypoint:
+
 ```bash
 python automodelling.py --dataset /path/to/data.csv --target churn --output runs/churn_search
+```
+
+Equivalent explicit alias:
+
+```bash
+python automodelling.py agent --dataset /path/to/data.csv --target churn --output runs/churn_search
 ```
 
 If you do not pass `--goal`, the tool will generate a sensible default goal from the target.
@@ -53,13 +86,58 @@ Machine-readable:
 python automodelling.py inspect --output runs/churn_search --json
 ```
 
+## Agent Entry Point
+
+If you are asking, "what command does the agent actually run?", the most `autoresearch`-style answer is this:
+
+```bash
+python agent.py --dataset /path/to/data.csv --target target_column --output runs/my_task
+```
+
+The direct backend form is:
+
+```bash
+python automodelling.py agent --dataset /path/to/data.csv --target target_column --output runs/my_task
+```
+
+The default form without the word `agent` does the same search:
+
+```bash
+python automodelling.py --dataset /path/to/data.csv --target target_column --output runs/my_task
+```
+
+For an external agent or orchestration system, the normal usage pattern is:
+
+1. Start the search:
+
+```bash
+python agent.py --dataset /path/to/data.csv --target target_column --output runs/my_task --max-experiments 5
+```
+
+2. Read back the state:
+
+```bash
+python automodelling.py inspect --output runs/my_task --json
+```
+
+3. Use the returned machine-readable artifacts:
+
+- `latest_summary.json` for the newest detailed result
+- `best_summary.json` for the promoted best artifact
+- `agentic_manifest.json` for the top-level run state
+- `analysis/ablation_summary.md` for attribution across experiments
+- `handoff/prediction_contract.json` for deployment-facing output details
+
+The agent does not need to scrape markdown if it uses `inspect --json`.
+
 ## The Easiest Mental Model
 
 Think of the project as 3 layers:
 
 - [prepare.py](/Users/hrishikesh/Desktop/automodelling/prepare.py): fixed evaluation harness
 - [train.py](/Users/hrishikesh/Desktop/automodelling/train.py): candidate models and training logic
-- [automodelling.py](/Users/hrishikesh/Desktop/automodelling/automodelling.py): agentic entrypoint that plans, runs, compares, and promotes experiments
+- [agent.py](/Users/hrishikesh/Desktop/automodelling/agent.py): the repo-level agent entrypoint
+- [automodelling.py](/Users/hrishikesh/Desktop/automodelling/automodelling.py): the backend agent/search runner
 
 There is also [planning.py](/Users/hrishikesh/Desktop/automodelling/planning.py), which decides what to try next, and can optionally use an external LLM planner.
 
@@ -84,7 +162,14 @@ When you run `automodelling.py`, the system:
 This is the default and recommended workflow.
 
 ```bash
+python agent.py --dataset /path/to/data.csv --target target_column --output runs/my_task
+```
+
+Equivalent backend forms:
+
+```bash
 python automodelling.py --dataset /path/to/data.csv --target target_column --output runs/my_task
+python automodelling.py agent --dataset /path/to/data.csv --target target_column --output runs/my_task
 ```
 
 Useful flags:
@@ -98,7 +183,7 @@ Useful flags:
 Use this when you want to run exactly one experiment instead of a search.
 
 ```bash
-python automodelling.py run --program program.json --output runs/my_task_single --description "baseline sweep"
+python agent.py run --program program.json --output runs/my_task_single --description "baseline sweep"
 ```
 
 You can also call [train.py](/Users/hrishikesh/Desktop/automodelling/train.py) directly:
@@ -112,7 +197,7 @@ python train.py --program program.json --output runs/my_task_single --descriptio
 You can generate a starter JSON program file:
 
 ```bash
-python automodelling.py init-program --path program.json --dataset /path/to/data.csv --target churn --goal "Predict churn"
+python agent.py init-program --path program.json --dataset /path/to/data.csv --target churn --goal "Predict churn"
 ```
 
 ## Program JSON
@@ -262,7 +347,7 @@ The default planner is built in and heuristic.
 You can optionally hand planning over to an external command:
 
 ```bash
-python automodelling.py \
+python agent.py \
   --dataset /path/to/data.csv \
   --output runs/my_task \
   --max-experiments 5 \
@@ -287,7 +372,7 @@ If the external planner fails or returns something invalid, the system falls bac
 ## How To Iterate Well
 
 - keep [prepare.py](/Users/hrishikesh/Desktop/automodelling/prepare.py) stable so comparisons stay fair
-- make model and search changes in [train.py](/Users/hrishikesh/Desktop/automodelling/train.py) or [planning.py](/Users/hrishikesh/Desktop/automodelling/planning.py)
+- make model and search changes in [train.py](/Users/hrishikesh/Desktop/automodelling/train.py), and use [planning.py](/Users/hrishikesh/Desktop/automodelling/planning.py) only if you intentionally want to change how the agent chooses the next run
 - use a clear `--description` for each run
 - prefer one planned change at a time when you want strong attribution evidence
 - check the generalization gap, warnings, and ablation summary before promoting a change

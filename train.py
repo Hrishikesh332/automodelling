@@ -1,10 +1,3 @@
-"""
-Editable training loop for AutoModelling.
-
-Change the candidate builders in this file when you want to iterate on model
-families, hyperparameters, or ensembling ideas. Leave prepare.py stable so
-metric comparisons stay trustworthy.
-"""
 
 from __future__ import annotations
 
