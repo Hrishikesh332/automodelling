@@ -1,10 +1,10 @@
 <h1 align="center">automodelling</h1>
 
+<p align="center"><em>An agentic tabular modelling system designed to be used for ML/DL standard training pipeline</em></p>
+
 <p align="center">
   <img src="src/header.png" alt="Automodelling workflow" />
 </p>
-
-`automodelling` is an agentic tabular modelling system designed to be used in an `autoresearch`-style workflow.
 
 You give it a tabular dataset, it runs structured experiments, tracks metrics, keeps the best artifact, and writes the reports needed to understand what changed and what to deploy.
 
@@ -118,13 +118,13 @@ For an external agent or orchestration system, the normal usage pattern is:
 python agent.py --dataset /path/to/data.csv --target target_column --output runs/my_task --max-experiments 5
 ```
 
-2. Read back the state:
+1. Read back the state:
 
 ```bash
 python automodelling.py inspect --output runs/my_task --json
 ```
 
-3. Use the returned machine-readable artifacts:
+1. Use the returned machine-readable artifacts:
 
 - `latest_summary.json` for the newest detailed result
 - `best_summary.json` for the promoted best artifact
