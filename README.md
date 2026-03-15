@@ -1,4 +1,8 @@
-# automodelling
+<h1 align="center">automodelling</h1>
+
+<p align="center">
+  <img src="src/header.png" alt="Automodelling workflow" />
+</p>
 
 `automodelling` is an agentic tabular modelling system designed to be used in an `autoresearch`-style workflow.
 
